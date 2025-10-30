@@ -4,6 +4,8 @@ import "encoding/json"
 
 // Options represents console arguments.
 type Options struct {
+	SNIConfig string `long:"sni-config" description:"Path to the SNI proxy JSON config."`
+
 	// DNSListenAddress is the IP address the DNS proxy server will be
 	// listening to.
 	DNSListenAddress string `long:"dns-address" description:"IP address that the DNS proxy server will be listening to." default:"0.0.0.0"`

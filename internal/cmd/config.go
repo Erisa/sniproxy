@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"encoding/json"
 	"net"
 	"net/netip"
+	"os"
 
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/ameshkov/sniproxy/internal/dnsproxy"
@@ -76,30 +78,46 @@ func toDNSProxyConfig(options *Options) (cfg *dnsproxy.Config) {
 // toSNIProxyConfig converts command-line arguments to [*sniproxy.Config] or
 // panics if the arguments aren't valid.
 func toSNIProxyConfig(options *Options) (cfg *sniproxy.Config) {
-	tlsIP := net.ParseIP(options.TLSListenAddress)
-	if tlsIP == nil {
-		log.Fatalf("cmd: failed to parse tls-address %s", options.TLSListenAddress)
-	}
+	if options.SNIConfig != "" {
+		file, err := os.ReadFile(options.SNIConfig)
+		if err != nil {
+			log.Fatalf("cmd: failed to read config file: %s", err)
+		}
+		var parsed sniproxy.Config
+		if err := json.Unmarshal(file, &parsed); err != nil {
+			log.Fatalf("cmd: failed to parse config file: %s", err)
+		}
+		cfg = &parsed
+	} else {
+		tlsIP := net.ParseIP(options.TLSListenAddress)
+		if tlsIP == nil {
+			log.Fatalf("cmd: failed to parse tls-address %s", options.TLSListenAddress)
+		}
 
-	plainIP := net.ParseIP(options.HTTPListenAddress)
-	if plainIP == nil {
-		log.Fatalf("cmd: failed to parse http-address %s", options.HTTPListenAddress)
-	}
+		plainIP := net.ParseIP(options.HTTPListenAddress)
+		if plainIP == nil {
+			log.Fatalf("cmd: failed to parse http-address %s", options.HTTPListenAddress)
+		}
 
-	cfg = &sniproxy.Config{
-		TLSListenAddr: &net.TCPAddr{
-			IP:   tlsIP,
-			Port: options.TLSPort,
-		},
-		HTTPListenAddr: &net.TCPAddr{
-			IP:   plainIP,
-			Port: options.HTTPPort,
-		},
-		ForwardProxy:  options.ForwardProxy,
-		ForwardRules:  options.ForwardRules,
-		BlockRules:    options.BlockRules,
-		DropRules:     options.DropRules,
-		BandwidthRate: options.BandwidthRate,
+		cfg = &sniproxy.Config{
+			TLSListenAddr: &sniproxy.TCPAddr{TCPAddr: &net.TCPAddr{
+				IP:   tlsIP,
+				Port: options.TLSPort,
+			}},
+			HTTPListenAddr: &sniproxy.TCPAddr{TCPAddr: &net.TCPAddr{
+				IP:   plainIP,
+				Port: options.HTTPPort,
+			}},
+			Forwards: []sniproxy.ForwardPolicy{
+				{
+					ForwardRules:   options.ForwardRules,
+					ForwardProxies: []string{options.ForwardProxy},
+				},
+			},
+			BlockRules:    options.BlockRules,
+			DropRules:     options.DropRules,
+			BandwidthRate: options.BandwidthRate,
+		}
 	}
 
 	return cfg

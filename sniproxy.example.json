@@ -1,0 +1,17 @@
+{
+    "tls_listen_addr": "127.0.0.1:443",
+    "forwards": [
+        {
+            "src": [
+                "ifconfig.me"
+            ],
+            "dst": [
+                "socks5://10.124.0.4"
+            ]
+        },
+        {
+            "src": ["myip.wtf"],
+            "dst": ["socks5://10.124.0.10"]
+        }
+    ]
+}

@@ -50,6 +50,11 @@ const (
 	remotePortTLS = 443
 )
 
+type ProxyPolicy struct {
+	Rules   []string
+	Dialers []*proxy.Dialer
+}
+
 // SNIProxy is a struct that manages the SNI proxy server.  This server's
 // purpose is to handle TLS connections and tunnel them to the respective
 // hosts.  Also, it can handle plain HTTP connections, parse the target host
@@ -61,12 +66,11 @@ type SNIProxy struct {
 	sniListener   net.Listener
 	plainListener net.Listener
 
-	dialer      *net.Dialer
-	proxyDialer proxy.Dialer
+	dialer   *net.Dialer
+	policies []ProxyPolicy
 
-	forwardRules []string
-	blockRules   []string
-	dropRules    []string
+	blockRules []string
+	dropRules  []string
 
 	limiter        *rate.Limiter
 	bandwidthRules map[string]float64
@@ -82,26 +86,37 @@ func New(cfg *Config) (d *SNIProxy, err error) {
 		Resolver: &net.Resolver{},
 	}
 
-	var proxyDialer proxy.Dialer
-	if cfg.ForwardProxy != "" {
-		var u *url.URL
-		u, err = url.Parse(cfg.ForwardProxy)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"sniproxy: failed to parse forward-proxy %s: %w",
-				cfg.ForwardProxy,
-				err,
-			)
+	var policies []ProxyPolicy
+
+	for _, forward := range cfg.Forwards {
+		var proxyDialers []*proxy.Dialer
+		for _, proxyURL := range forward.ForwardProxies {
+			var u *url.URL
+			u, err = url.Parse(proxyURL)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"sniproxy: failed to parse forward-proxy %s: %w",
+					forward.ForwardProxies,
+					err,
+				)
+			}
+
+			dialer, err := proxy.FromURL(u, dialer)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"sniproxy: failed to init forward-proxy %s: %w",
+					forward.ForwardProxies,
+					err,
+				)
+			}
+
+			proxyDialers = append(proxyDialers, &dialer)
 		}
 
-		proxyDialer, err = proxy.FromURL(u, dialer)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"sniproxy: failed to init forward-proxy %s: %w",
-				cfg.ForwardProxy,
-				err,
-			)
-		}
+		policies = append(policies, ProxyPolicy{
+			Rules:   forward.ForwardRules,
+			Dialers: proxyDialers,
+		})
 	}
 
 	var limiter *rate.Limiter
@@ -112,12 +127,20 @@ func New(cfg *Config) (d *SNIProxy, err error) {
 		limiter.AllowN(time.Now(), 1000_000_000)
 	}
 
+	var tlsListenAddr *net.TCPAddr
+	if cfg.TLSListenAddr != nil {
+		tlsListenAddr = cfg.TLSListenAddr.TCPAddr
+	}
+
+	var httpListenAddr *net.TCPAddr
+	if cfg.HTTPListenAddr != nil {
+		httpListenAddr = cfg.HTTPListenAddr.TCPAddr
+	}
+
 	return &SNIProxy{
-		tlsListenAddr:  cfg.TLSListenAddr,
-		httpListenAddr: cfg.HTTPListenAddr,
-		dialer:         dialer,
-		proxyDialer:    proxyDialer,
-		forwardRules:   cfg.ForwardRules,
+		tlsListenAddr:  tlsListenAddr,
+		httpListenAddr: httpListenAddr, dialer: dialer,
+		policies:       policies,
 		blockRules:     cfg.BlockRules,
 		dropRules:      cfg.DropRules,
 		limiter:        limiter,
@@ -261,7 +284,7 @@ func (p *SNIProxy) handleConnection(clientConn net.Conn, plainHTTP bool) (err er
 
 	wg.Wait()
 
-	elapsed := time.Now().Sub(startTime)
+	elapsed := time.Since(startTime)
 	bandwidthRate := float64(bytesReceived+bytesSent) / elapsed.Seconds()
 
 	log.Info(
@@ -283,25 +306,22 @@ func (p *SNIProxy) handleConnection(clientConn net.Conn, plainHTTP bool) (err er
 //
 // TODO(ameshkov): consider using DNSUpstream to resolve the specified hostname.
 func (p *SNIProxy) dial(ctx *SNIContext) (conn net.Conn, err error) {
-	if p.shouldForward(ctx) {
-		return p.proxyDialer.Dial("tcp", ctx.RemoteAddr)
+	if dialer := p.matchForward(ctx); dialer != nil {
+		return (*dialer).Dial("tcp", ctx.RemoteAddr)
 	}
 
 	return p.dialer.Dial("tcp", ctx.RemoteAddr)
 }
 
-// shouldForward checks if the connection should be forwarded to the next proxy.
-func (p *SNIProxy) shouldForward(ctx *SNIContext) (ok bool) {
-	if p.proxyDialer == nil {
-		return false
+// matchForward returns the respective dialer if the connection should be forwarded to the next proxy.
+func (p *SNIProxy) matchForward(ctx *SNIContext) (dialer *proxy.Dialer) {
+	for _, policy := range p.policies {
+		if filter.MatchWildcards(ctx.RemoteHost, policy.Rules) {
+			return policy.Dialers[0] // TODO(kotx): implement load balancing
+		}
 	}
 
-	if len(p.forwardRules) == 0 {
-		// forward all connections if there are no rules.
-		return true
-	}
-
-	return filter.MatchWildcards(ctx.RemoteHost, p.forwardRules)
+	return nil
 }
 
 // closeWriter is a helper interface which only purpose is to check if the
